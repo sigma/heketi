@@ -16,13 +16,12 @@ import (
 	"strconv"
 	"strings"
 
+	api "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	client "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
-	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/typed/core/v1"
-	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
-	kubeletcmd "k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/heketi/heketi/executors/cmdexec"
 	"github.com/heketi/heketi/pkg/kubernetes"
@@ -41,7 +40,6 @@ type KubeExecutor struct {
 	config     *KubeConfig
 	namespace  string
 	kube       *client.Clientset
-	rest       restclient.Interface
 	kubeConfig *restclient.Config
 }
 
@@ -134,13 +132,6 @@ func NewKubeExecutor(config *KubeConfig) (*KubeExecutor, error) {
 		return nil, logger.LogError("Unable to create configuration for Kubernetes: %v", err)
 	}
 
-	// Get a raw REST client.  This is still needed for kube-exec
-	restCore, err := coreclient.NewForConfig(k.kubeConfig)
-	if err != nil {
-		return nil, logger.LogError("Unable to create a client connection: %v", err)
-	}
-	k.rest = restCore.RESTClient()
-
 	// Get a Go-client for Kubernetes
 	k.kube, err = client.NewForConfig(k.kubeConfig)
 	if err != nil {
@@ -208,7 +199,7 @@ func (k *KubeExecutor) ConnectAndExec(host, resource string,
 		// SUDO is *not* supported
 
 		// Create REST command
-		req := k.rest.Post().
+		req := k.kube.CoreV1().RESTClient().Post().
 			Resource(resource).
 			Name(podName).
 			Namespace(k.namespace).
@@ -219,10 +210,10 @@ func (k *KubeExecutor) ConnectAndExec(host, resource string,
 			Command:   []string{"/bin/bash", "-c", command},
 			Stdout:    true,
 			Stderr:    true,
-		}, api.ParameterCodec)
+		}, scheme.ParameterCodec)
 
 		// Create SPDY connection
-		exec, err := remotecommand.NewExecutor(k.kubeConfig, "POST", req.URL())
+		exec, err := remotecommand.NewSPDYExecutor(k.kubeConfig, "POST", req.URL())
 		if err != nil {
 			logger.Err(err)
 			return nil, fmt.Errorf("Unable to setup a session with %v", podName)
@@ -234,9 +225,8 @@ func (k *KubeExecutor) ConnectAndExec(host, resource string,
 
 		// Excute command
 		err = exec.Stream(remotecommand.StreamOptions{
-			SupportedProtocols: kubeletcmd.SupportedStreamingProtocols,
-			Stdout:             &b,
-			Stderr:             &berr,
+			Stdout: &b,
+			Stderr: &berr,
 		})
 		if err != nil {
 			logger.LogError("Failed to run command [%v] on %v: Err[%v]: Stdout [%v]: Stderr [%v]",
